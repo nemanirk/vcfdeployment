@@ -1,176 +1,161 @@
-# ==========================================
-# ESXi Advanced Inventory & DNS Validator
-# ==========================================
+#----------- VCF 9.0 Management Domain Deployment Script (v4.1) -----------
 
-# --- [1] Configuration & Log Setup ---
-$HostListFile = Read-Host "Enter the full path to your ESXi hosts txt file"
-if (-not (Test-Path $HostListFile)) { 
-    Write-Host "ERROR: File not found at $HostListFile" -ForegroundColor Red; exit 
-}
-
-$Timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-$LogPath = Join-Path $PSScriptRoot "ESXi_Full_Validation_$Timestamp.log"
-
-function Write-OutputAll {
-    param([string]$Message, [ConsoleColor]$Color = "White", [ConsoleColor]$BG = "Black")
-    $Stamp = Get-Date -Format "HH:mm:ss"
-    $FormattedMsg = "[$Stamp] $Message"
-    Write-Host $FormattedMsg -ForegroundColor $Color -BackgroundColor $BG
-    $FormattedMsg | Out-File -FilePath $LogPath -Append
-}
-
-# --- [2] Credentials ---
-$User = "root"
-$Password = Read-Host "Enter ESXi root password" -AsSecureString
-$BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($Password)
-$PlainPassword = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR)
-
-$InputHosts = Get-Content $HostListFile | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
-
-Write-OutputAll "Starting Full ESXi Validation..." -Color Cyan
-
-# --- [3] Process Hosts ---
-foreach ($InputName in $InputHosts) {
-    Write-OutputAll "`n================ HOST: $InputName ================" -Color White -BG DarkBlue
-    
-    $ResolvedIP = "N/A"
+# --- [Function] Get Authentication Token ---
+function Get-SddcAuthToken {
+    param ($Fqdn, $User, $Pass)
+    $TokenUrl = "https://${Fqdn}/v1/tokens"
+    $Body = @{ username = $User; password = $Pass } | ConvertTo-Json
     try {
-        $ResolvedIP = [System.Net.Dns]::GetHostAddresses($InputName).IPAddressToString | Select-Object -First 1
-        Write-OutputAll "Forward Lookup: Found IP $ResolvedIP"
-        $fPing = Test-Connection -ComputerName $InputName -Count 1 -Quiet
-        $iPing = Test-Connection -ComputerName $ResolvedIP -Count 1 -Quiet
-        Write-OutputAll "Ping FQDN: $fPing"
-        Write-OutputAll "Ping IP:   $iPing"
-    } catch { 
-        Write-OutputAll "DNS/Ping: FAILED" -Color Red 
-    }
-
-    try {
-        # B. Connect to Host
-        $Conn = Connect-VIServer -Server $InputName -User $User -Password $PlainPassword -ErrorAction Stop
-        
-        # RETRIEVE HOSTNAME VIA ESXCLI
-        $esxcli = Get-EsxCli -VMHost $InputName -V2
-        $hostnameInfo = $esxcli.system.hostname.get.Invoke()
-        $ActualName = $hostnameInfo.FullyQualifiedDomainName
-        
-        $vmhost = Get-VMHost -Name $InputName
-        Write-OutputAll "ESX Hostname (ESXCLI FQDN): $ActualName" -Color Cyan
-        Write-OutputAll "ESX Version: $($vmhost.Version) (Build: $($vmhost.Build))"
-
-        # C. DNS PTR MATCH (REVISED FOR CASE PRESERVATION)
-        $PtrFqdn = "PTR_NOT_FOUND"
-        try {
-            # Resolve-DnsName is more likely to return the raw string from the DNS record
-            $DnsResult = Resolve-DnsName -Name $ResolvedIP -Type PTR -ErrorAction Stop
-            # We select the NameHost property which contains the target FQDN
-            $PtrFqdn = $DnsResult.NameHost.TrimEnd('.') 
-            
-            Write-OutputAll "Reverse Lookup (PTR): $PtrFqdn"
-            
-            if ($ActualName -ceq $PtrFqdn) {
-                Write-OutputAll "DNS Match Result: MATCH (Exact Case)" -Color Green
-            }
-            elseif ($ActualName -ieq $PtrFqdn) {
-                Write-OutputAll "DNS Match Result: MISMATCH (Case Differs: $ActualName vs $PtrFqdn)" -Color Yellow
-            }
-            else {
-                Write-OutputAll "DNS Match Result: MISMATCH (Full Name Mismatch)" -Color Red
-            }
-        } catch { 
-            Write-OutputAll "DNS Match Result: FAILED (No PTR record found via Resolve-DnsName)" -Color Red 
-        }
-
-        # D. Certificate Check (Case-Sensitive)
-        try {
-            $TcpClient = New-Object System.Net.Sockets.TcpClient($InputName, 443)
-            $SslStream = New-Object System.Net.Security.SslStream($TcpClient.GetStream(), $false, { $true })
-            $SslStream.AuthenticateAsClient($InputName)
-            $CertObj = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($SslStream.RemoteCertificate)
-            
-            $CertCN = (($CertObj.Subject -split "CN=")[1] -split ",")[0]
-            $CertSANList = @()
-            $Ext = $CertObj.Extensions | Where-Object { $_.Oid.FriendlyName -eq "Subject Alternative Name" }
-            if ($null -ne $Ext) { 
-                $CertSANList = $Ext.Format($false) -split ", " | ForEach-Object { $_ -replace "DNS Name=", "" }
-            }
-
-            Write-OutputAll "Certificate CN:  $CertCN"
-            Write-OutputAll "Certificate SAN: $($CertSANList -join ', ')"
-            
-            $CertStatus = "MISMATCH"
-            $CertColor = "Red"
-            $MatchedSAN = $false
-            foreach ($san in $CertSANList) {
-                if ($san -ceq $ActualName) { $MatchedSAN = $true }
-            }
-
-            if ($CertCN -ceq $ActualName -or $MatchedSAN -eq $true) {
-                $CertStatus = "MATCH (Exact Case)"
-                $CertColor = "Green"
-            }
-            elseif ($CertCN -ieq $ActualName -or ($CertSANList -contains $ActualName)) {
-                $CertStatus = "MISMATCH (Case Differs: $ActualName vs Cert)"
-                $CertColor = "Yellow"
-            }
-
-            Write-OutputAll "Certificate Result: $CertStatus" -Color $CertColor
-            $TcpClient.Close()
-        } catch { Write-OutputAll "Certificate Check: FAILED" -Color Red }
-
-        # E. SSH Service Check
-        $sshSvc = Get-VMHostService -VMHost $vmhost | Where-Object {$_.Key -eq "TSM-SSH"}
-        $sshRun = "Stopped"; $sshColor = "Yellow"
-        if ($sshSvc.Running) { $sshRun = "Running"; $sshColor = "Green" }
-        Write-OutputAll "SSH Service: $sshRun" -Color $sshColor
-        Write-OutputAll "SSH Policy: $($sshSvc.Policy)"
-
-        # F. NTP Configuration
-        $ntpSrv = Get-VMHostNtpServer -VMHost $vmhost
-        $ntpSvc = Get-VMHostService -VMHost $vmhost | Where-Object {$_.Key -eq "ntpd"}
-        $ntpRun = "Stopped"
-        if ($ntpSvc.Running) { $ntpRun = "Running" }
-        Write-OutputAll "NTP Servers: $($ntpSrv -join ', ')"
-        Write-OutputAll "NTP Service: $ntpRun (Policy: $($ntpSvc.Policy))"
-
-        # G. Virtual Networking
-        Write-OutputAll "VIRTUAL NETWORKING:" -Color Yellow
-        $vSwitches = Get-VirtualSwitch -VMHost $vmhost
-        foreach ($vs in $vSwitches) {
-            Write-OutputAll "  - Switch: $($vs.Name)"
-            $pgs = Get-VirtualPortGroup -VirtualSwitch $vs
-            foreach ($pg in $pgs) {
-                Write-OutputAll "    * PortGroup: $($pg.Name) | VLAN: $($pg.VLanId)"
-            }
-        }
-
-        # H. Physical NICs
-        Write-OutputAll "PHYSICAL NICS:" -Color Yellow
-        $pnics = Get-VMHostNetworkAdapter -VMHost $vmhost -Physical
-        foreach ($p in $pnics) {
-            $pName = $p.Name
-            $pLink = "Down"
-            if ($null -ne $p.ExtensionData.LinkSpeed) { $pLink = "Up" }
-            $pSpeed = "0"
-            if ($null -ne $p.ExtensionData.LinkSpeed) { $pSpeed = [string]$p.ExtensionData.LinkSpeed.SpeedMb }
-            
-            $pUsage = "Unused"
-            foreach ($vsCheck in $vSwitches) {
-                if ($vsCheck.Nic -contains $pName) { $pUsage = "Active/Standby" }
-            }
-            Write-OutputAll "  - $pName | Status: $pUsage | Link: $pLink | Speed: $pSpeed Mbps"
-        }
-
-        # I. Datastores
-        $dsList = Get-Datastore -VMHost $vmhost | Select-Object -ExpandProperty Name
-        Write-OutputAll "DATASTORES: $($dsList -join ', ')"
-
-        Disconnect-VIServer -Server $Conn -Confirm:$false
+        $Resp = Invoke-RestMethod -Uri $TokenUrl -Method Post -Body $Body -ContentType "application/json" -SkipCertificateCheck -ErrorAction Stop
+        return $Resp.accessToken
     } catch {
-        Write-OutputAll "CRITICAL ERROR: $($_.Exception.Message)" -Color Red
+        Write-Host "`n[ERROR] VCF Installer Authentication Failed!" -ForegroundColor Red; exit
     }
 }
 
-# --- Cleanup ---
-[System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR)
-Write-OutputAll "`nValidation Finished. Log: $LogPath" -Color Cyan
+# --- [STEP 1: Authentication] ---
+Write-Host "==========================================================" -ForegroundColor Cyan
+Write-Host " VCF 9.0 MANAGEMENT DOMAIN DEPLOYMENT & BRING-UP" -ForegroundColor White
+Write-Host "==========================================================" -ForegroundColor Cyan
+
+$VcfFqdn = Read-Host "`nEnter VCF Installer (Cloud Builder) FQDN"
+$VcfUser = Read-Host "Enter Admin Username"
+$SecurePass = Read-Host "Enter Admin Password" -AsSecureString
+$VcfPass = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto([System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecurePass))
+
+$AuthToken = Get-SddcAuthToken -Fqdn $VcfFqdn -User $VcfUser -Pass $VcfPass
+$GlobalHeader = @{ "Authorization" = "Bearer ${AuthToken}"; "Content-Type" = "application/json" }
+Write-Host "Success! Authentication token received.`n" -ForegroundColor Green
+
+# --- [STEP 2: JSON Payload Prep & Filename Generation] ---
+$FileTS = Get-Date -Format "yyyyMMdd_HHmm"
+$TemplateJsonPath = Read-Host "Enter the file path for the original JSON template"
+$OutputJsonPath = Read-Host "Enter the name/path for the NEW output JSON file"
+$LogPath = "bringupSpec_validation_log_$($FileTS).csv"
+$ResponseJsonPath = "bringupSpec_validation_$($FileTS).json"
+
+try { 
+    $Payload = Get-Content $TemplateJsonPath -Raw | ConvertFrom-Json 
+} catch { 
+    Write-Host "[ERROR] Failed to parse template JSON file." -ForegroundColor Red; exit 
+}
+
+# ... [Host & Thumbprint Logic remains same] ...
+$UpdateHosts = Read-Host "`nDo you want to update hosts from a text file? (y/n)"
+if ($UpdateHosts -eq "y") {
+    $TxtPath = Read-Host "Enter the path for the host FQDNs text file"
+    $HostPassSecure = Read-Host "Enter the ESXi root password for all hosts" -AsSecureString
+    $HostPassPlain = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto([System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($HostPassSecure))
+    $NewHosts = Get-Content $TxtPath | Where-Object { $_.Trim() -ne "" }
+    $CurrentSpecs = if ($Payload.sddcSpec.hostSpecs) { $Payload.sddcSpec.hostSpecs } else { $Payload.hostSpecs }
+    $TemplateHost = $CurrentSpecs[0] | ConvertTo-Json | ConvertFrom-Json 
+    $UpdatedHostList = New-Object System.Collections.Generic.List[PSObject]
+    for ($i = 0; $i -lt $NewHosts.Count; $i++) {
+        $FQDN = $NewHosts[$i].Trim(); $NewEntry = $TemplateHost | ConvertTo-Json | ConvertFrom-Json 
+        $NewEntry.hostname = $FQDN; $NewEntry.credentials.password = $HostPassPlain; $UpdatedHostList.Add($NewEntry)
+    }
+    if ($Payload.sddcSpec.hostSpecs) { $Payload.sddcSpec.hostSpecs = $UpdatedHostList.ToArray() } else { $Payload.hostSpecs = $UpdatedHostList.ToArray() }
+    if ((Read-Host "`nRetrieve SSL thumbprints? (y/n)") -eq "y") {
+        foreach ($h in $UpdatedHostList) {
+            $Cmd = "echo Q | openssl s_client -connect $($h.hostname):443 2>NUL | openssl x509 -noout -fingerprint -sha256"
+            if ((cmd /c $Cmd) -match "Fingerprint=(.+)") { $h.sslThumbprint = $matches[1].Trim(); Write-Host " [+] $($h.hostname) Thumbprint OK" -ForegroundColor Green }
+        }
+    }
+}
+
+if ($Payload.ceipEnabled -ne $null) { $Payload.ceipEnabled = [System.Convert]::ToBoolean($Payload.ceipEnabled) }
+$FinalJsonString = $Payload | ConvertTo-Json -Depth 100
+$FinalJsonString | Set-Content $OutputJsonPath
+
+# --- [STEP 3: Pre-Validation Check] ---
+Write-Host "`nChecking for existing validation tasks..." -ForegroundColor Cyan
+try {
+    $AllVal = Invoke-RestMethod -Uri "https://${VcfFqdn}/v1/sddcs/validations" -Method Get -Headers $GlobalHeader -SkipCertificateCheck
+    if ($AllVal | Where-Object { $_.executionStatus -eq "IN_PROGRESS" }) {
+        Write-Host "[HOLD] Another task is running. Please wait and retry later." -ForegroundColor Red; exit
+    }
+} catch { Write-Warning "Pre-check skipped." }
+
+# --- [STEP 4: Validation Submission] ---
+if ((Read-Host "`nSubmit the spec for validation? (y/n)") -eq "y") {
+    $VUrl = "https://${VcfFqdn}/v1/sddcs/validations"
+    try {
+        $Resp = Invoke-RestMethod -Uri $VUrl -Method Post -Headers $GlobalHeader -Body $FinalJsonString -SkipCertificateCheck -ErrorAction Stop
+    } catch {
+        Write-Host "`n[ERROR] Submission Failed!" -ForegroundColor Red
+        if ($_.Exception.Response) {
+            $Reader = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream())
+            Write-Host "Server Message: $($Reader.ReadToEnd())" -ForegroundColor Yellow
+        } else { Write-Host "Error: $($_.Exception.Message)" -ForegroundColor Red }
+        exit
+    }
+
+    $vId = $Resp.id
+    Write-Host "`nValidation Task Started! ID: $vId" -ForegroundColor Green
+
+    # --- [STEP 5: Polling & Reporting] ---
+    $CheckUrl = "https://${VcfFqdn}/v1/sddcs/validations/$vId"
+    $TerminalStates = @("COMPLETED", "FAILED", "CANCELLED")
+    $CurrentExecStatus = "IN_PROGRESS"
+
+    Write-Host "`nMonitoring Validation Checks (Interval: 30s)..." -ForegroundColor Cyan
+    Write-Host "Current log file: $LogPath" -ForegroundColor Gray
+
+    while ($TerminalStates -notcontains $CurrentExecStatus) {
+        try {
+            $ValResp = Invoke-RestMethod -Uri $CheckUrl -Method Get -Headers $GlobalHeader -SkipCertificateCheck
+            $CurrentExecStatus = $ValResp.executionStatus
+            $TimeStamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+
+            Write-Host "`n[$TimeStamp] Overall Execution: $CurrentExecStatus | Result: $($ValResp.resultStatus)" -ForegroundColor White
+            Write-Host "--------------------------------------------------------------------------------" -ForegroundColor Gray
+
+            $CurrentPollResults = New-Object System.Collections.Generic.List[PSObject]
+
+            foreach ($check in $ValResp.validationChecks) {
+                $cColor = switch ($check.resultStatus) {
+                    "SUCCEEDED"   { "Green" }
+                    "FAILED"      { "Red" }
+                    "IN_PROGRESS" { "Yellow" }
+                    Default       { "Gray" }
+                }
+                
+                Write-Host " - $($check.description.PadRight(50)) : " -NoNewline
+                Write-Host "$($check.resultStatus)" -ForegroundColor $cColor
+
+                $CurrentPollResults.Add([PSCustomObject]@{
+                    Time        = $TimeStamp
+                    Description = $check.description
+                    Status      = $check.resultStatus
+                    Severity    = $check.severity
+                })
+            }
+            # Overwrite the specific CSV for THIS run with the latest snapshot
+            $CurrentPollResults | Export-Csv -Path $LogPath -NoTypeInformation -Force
+
+        } catch { Write-Warning "API unavailable, retrying..." }
+
+        if ($TerminalStates -notcontains $CurrentExecStatus) { Start-Sleep -Seconds 30 }
+    }
+
+    # Save final JSON response with timestamped name
+    $ValResp | ConvertTo-Json -Depth 100 | Set-Content $ResponseJsonPath
+    Write-Host "`n[COMPLETED] Full JSON saved to: $ResponseJsonPath" -ForegroundColor Cyan
+    Write-Host "[COMPLETED] CSV log saved to: $LogPath" -ForegroundColor Cyan
+
+    # --- [STEP 6: Final Result & Bring-Up] ---
+    if ($ValResp.resultStatus -eq "SUCCEEDED" -or $ValResp.resultStatus -eq "WARNING") {
+        if ($ValResp.resultStatus -eq "WARNING") {
+            Write-Host "`n[WARNING] Succeeded with warnings." -ForegroundColor Yellow
+        } else {
+            Write-Host "`n[SUCCESS] All checks passed." -ForegroundColor Green
+        }
+
+        if ((Read-Host "Start Bring-Up? (yes/no)") -eq "yes") {
+            $DeployResp = Invoke-RestMethod -Uri "https://${VcfFqdn}/v1/sddcs" -Method Post -Headers $GlobalHeader -Body $FinalJsonString -SkipCertificateCheck
+            Write-Host "`n[SUCCESS] Bring-Up Started! ID: $($DeployResp.id). Login to the Installer UI to monitor the progress." -ForegroundColor Green -BackgroundColor Black
+        }
+    } else {
+        Write-Host "`n[FAILED] Validation result: $($ValResp.resultStatus). Review files above for details." -ForegroundColor Red
+    }
+}
