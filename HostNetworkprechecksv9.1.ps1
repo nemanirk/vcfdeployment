@@ -57,7 +57,7 @@ $tepVlan    = Read-Host "Enter TEP VLAN ID"
 $tepGateway = Read-Host "Enter TEP Gateway IP"
 $tepMask    = Read-Host "Enter TEP Subnet Mask"
 $tepStart   = Read-Host "Enter TEP Free IP Start"
-$tepEnd     = Read-Host "Enter TEP Free IP End"
+$tepEnd      = Read-Host "Enter TEP Free IP End"
 
 $tepBase    = $tepStart.Substring(0, $tepStart.LastIndexOf('.') + 1)
 $startOctet = [int]$tepStart.Split('.')[-1]
@@ -201,13 +201,13 @@ foreach ($Net in $NetworkConfigs) {
                 $TestResults.Add([PSCustomObject]@{ Network=$NetObj.Name; VLAN=$NetObj.VLAN; Source=$Source; DestinationType="Peer"; DestinationIP=$DestIP; Uplink=$Active; Status=$status })
                 Write-Host "${Source} -> ${DestIP} via ${Active}: ${status}"
 
-                # Gateway Ping Logic
+                # Gateway Ping Logic - Restored Formatting
                 $ShouldPingGW = ($NetObj.Name -eq "NSX_TEP") -or ($GwChoice -eq "y" -and ($NetObj.Name -match "vMotion|vSAN"))
                 if ($NetObj.Gateway -and $ShouldPingGW) {
                     $gParams = $esxcli.network.diag.ping.CreateArgs(); $gParams.host = $NetObj.Gateway; $gParams.interface = "vmk1"; $gParams.size = 8872; $gParams.df = $true
                     try { $gRes = @($esxcli.network.diag.ping.Invoke($gParams)) | Select-Object -First 1; $gStatus = ($gRes.Summary.received -gt 0) ? "PASS" : "FAIL" } catch { $gStatus = "ERROR" }
                     $TestResults.Add([PSCustomObject]@{ Network="$($NetObj.Name)_GW"; VLAN=$NetObj.VLAN; Source=$Source; DestinationType="Gateway"; DestinationIP=$NetObj.Gateway; Uplink=$Active; Status=$gStatus })
-                    Write-Host "  GW:  ${Source} -> $($NetObj.Gateway) via ${Active}: ${gStatus}"
+                    Write-Host "${Source} -> Gateway ($($NetObj.Gateway)) via ${Active}: ${gStatus}"
                 }
             }
         }
@@ -239,10 +239,11 @@ foreach ($ESXi in $Hosts) {
         $conn = $ConnectionMap[$ESXi]
         if ($conn) {
             $vmhost = Get-VMHost -Server $conn
-            
             $vSwitch = Get-VirtualSwitch -VMHost $vmhost -Name $vSwitchName
             $OldMtu = $vSwitch.Mtu
-            Write-Host "Resetting vSwitch0 MTU on ${ESXi} to 1500..." -ForegroundColor Gray
+
+            # RESTORED CLEANUP FORMATTING
+            Write-Host "Resetting vSwitch0 from vSwitch0 on $ESXi ..." -ForegroundColor Gray
             $vSwitch | Set-VirtualSwitch -Mtu 1500 -Confirm:$false | Out-Null
             Write-Host "vSwitch0                $OldMtu       1500" -ForegroundColor Gray
 
@@ -255,8 +256,8 @@ foreach ($ESXi in $Hosts) {
             $mgmtPGName = (Get-VMHostNetworkAdapter -VMHost $vmhost -Name "vmk0").PortGroupName
             Get-VirtualPortGroup -VMHost $vmhost -Name $mgmtPGName | Get-NicTeamingPolicy | Set-NicTeamingPolicy -MakeNicActive "vmnic0" -Confirm:$false | Out-Null
 
-            $vSwitch = Get-VirtualSwitch -VMHost $vmhost -Name $vSwitchName
             if ($vSwitch.Nic -contains "vmnic1") {
+                # RESTORED CLEANUP FORMATTING
                 Write-Host "Removing vmnic1 from vSwitch0 on $ESXi..." -ForegroundColor Gray
                 $vmhost | Get-VMHostNetworkAdapter -Physical -Name "vmnic1" | Remove-VirtualSwitchPhysicalNetworkAdapter -Confirm:$false | Out-Null
             }
