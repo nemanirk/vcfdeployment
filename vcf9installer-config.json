@@ -1,0 +1,29 @@
+{
+    "Infrastructure": {
+        "VmName": "vcf9-sddc-manager",
+        "Datastore": "Datastor1",
+        "Network": "VM Network",
+        "OvaPath": "f:\\binaries\\VCF-SDDC-Manager-Appliance-9.0.1.0.24962180.ova",
+        "OvfToolPath": "C:\\Program Files\\VMware\\VMware OVF Tool\\ovftool.exe"
+    },
+    "ApplianceProperties": {
+        "vami_hostname": "sfo-is01.sfo.rainpole.io",
+        "vami_ip0_SDDC_Manager": "10.11.10.231",
+        "vami_netmask0_SDDC_Manager": "255.255.255.0",
+        "vami_gateway_SDDC_Manager": "10.11.10.1",
+        "vami_domain_SDDC_Manager": "sfo.rainpole.io",
+        "vami_searchpath_SDDC_Manager": "sfo.rainpole.io",
+        "vami_DNS_SDDC_Manager": "10.11.10.4,10.11.10.5",
+        "guestinfo_ntp": "10.11.10.4,10.11.10.5",
+        "ROOT_PASSWORD": "VMw@re1!VMw@re1!",
+        "LOCAL_USER_PASSWORD": "VMw@re1!VMw@re1!",
+        "VCF_PASSWORD": "VMw@re1!VMw@re1!"
+    },
+    "DepotSettings": {
+        "isOfflineDepot": true,
+        "hostname": "depot.vcf-gcp.broadcom.net",
+        "port": 443,
+        "depot_user": "depot_user",
+        "depot_pass": "VMware1!"
+    }
+}
