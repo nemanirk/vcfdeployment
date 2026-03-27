@@ -21,9 +21,9 @@
     },
     "DepotSettings": {
         "isOfflineDepot": true,
-        "hostname": "depot.vcf-gcp.broadcom.net",
+        "hostname": "depot.example.net",
         "port": 443,
         "depot_user": "depot_user",
-        "depot_pass": "VMware1!"
+        "depot_pass": "depotuser"
     }
 }
