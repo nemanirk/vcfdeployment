@@ -21,9 +21,12 @@
     },
     "DepotSettings": {
         "isOfflineDepot": true,
-        "hostname": "depot.example.net",
+        "hostname": "depot.vcf-gcp.broadcom.net",
         "port": 443,
         "depot_user": "depot_user",
-        "depot_pass": "depotuser"
+        "depot_pass": "VMware1!"
+    },
+    "BundleSettings": {
+        "target_version": "9.0.1.0"
     }
 }
