@@ -9,7 +9,7 @@ function Get-SddcAuthToken {
     param ($Fqdn, $User, $Pass)
     $TokenUrl = "https://${Fqdn}/v1/tokens"
     
-    # Building literal JSON to prevent PowerShell from modifying special characters in passwords
+    # Building literal JSON to prevent PowerShell from modifying special characters
     $LiteralBody = '{"username":"' + $User + '","password":"' + $Pass + '"}'
     
     try {
@@ -36,13 +36,7 @@ Write-Host "`n===============================================" -ForegroundColor 
 Write-Host " VCF 9.0.1 UNIFIED DEPLOYMENT UTILITY"
 Write-Host "===============================================" -ForegroundColor Cyan
 
-# --- [1] Target Infrastructure Credentials ---
-$TargetServer = Read-Host "Enter Target vCenter or ESXi FQDN/IP"
-$TargetUser   = Read-Host "Enter Target Username (e.g., root)"
-$TargetPassIn = Read-Host "Enter Target Password" -AsSecureString
-$TargetPass   = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto([System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($TargetPassIn))
-
-# --- [2] Select Input Method ---
+# --- [1] Select Input Method ---
 $InputMethod = Read-Host "Use Config File (F) or Manual Entry (M)?"
 
 if ($InputMethod -eq "F" -or $InputMethod -eq "f") {
@@ -55,22 +49,62 @@ if ($InputMethod -eq "F" -or $InputMethod -eq "f") {
     $Depot = $Cfg.DepotSettings
     $BundleCfg = $Cfg.BundleSettings
     $OvfExe = $Infra.OvfToolPath
+
+    # Fetching Target Host and User from JSON
+    $TargetServer = $Infra.TargetHost
+    $TargetUser   = $Infra.TargetUser
+    Write-Host "Target Host: $TargetServer (Loaded from Config)" -ForegroundColor Gray
+    Write-Host "Target User: $TargetUser (Loaded from Config)" -ForegroundColor Gray
+    
+    $TargetPassIn = Read-Host "Enter Target Password for $TargetUser" -AsSecureString
 } 
 else {
+    Write-Host "`n--- Target Infrastructure Credentials ---" -ForegroundColor Yellow
+    $TargetServer = Read-Host "Enter Target vCenter or ESXi FQDN/IP"
+    $TargetUser   = Read-Host "Enter Target Username (e.g., root)"
+    $TargetPassIn = Read-Host "Enter Target Password" -AsSecureString
+
     Write-Host "`n--- Deployment Details ---" -ForegroundColor Yellow
     $Infra = [PSCustomObject]@{
         VmName = Read-Host "New VM Name"; Datastore = Read-Host "Datastore"; Network = Read-Host "Network"; OvaPath = Read-Host "Full path to OVA"
     }
     $OvfExe = "C:\Program Files\VMware\VMware OVF Tool\ovftool.exe"
+    
+    Write-Host "`n--- Appliance Network & OS Settings ---" -ForegroundColor Yellow
     $Props = [PSCustomObject]@{
         vami_hostname = Read-Host "FQDN"; vami_ip0_SDDC_Manager = Read-Host "IP"; vami_netmask0_SDDC_Manager = Read-Host "Netmask"
         vami_gateway_SDDC_Manager = Read-Host "Gateway"; vami_domain_SDDC_Manager = Read-Host "Domain"; vami_searchpath_SDDC_Manager = Read-Host "Search Path"
         vami_DNS_SDDC_Manager = Read-Host "DNS"; guestinfo_ntp = Read-Host "NTP"; ROOT_PASSWORD = Read-Host "ROOT Pass"
         LOCAL_USER_PASSWORD = Read-Host "LOCAL_USER Pass"; VCF_PASSWORD = Read-Host "VCF Pass"
     }
-    $Depot = [PSCustomObject]@{ isOfflineDepot = $true; hostname = "depot.vcf-gcp.broadcom.net"; port = 443; depot_user = Read-Host "Depot User"; depot_pass = Read-Host "Depot Pass" }
-    $BundleCfg = [PSCustomObject]@{ target_version = Read-Host "Target Version (e.g. 9.0.1.0)" }
+
+    Write-Host "`n--- Depot Settings ---" -ForegroundColor Yellow
+    $isOfflineInput = Read-Host "Is this an offline depot? (y/n)"
+    $isOffline = if ($isOfflineInput -eq "y") { $true } else { $false }
+    
+    if ($isOffline) {
+        $Depot = [PSCustomObject]@{
+            isOfflineDepot = $true
+            hostname = Read-Host "Depot Host FQDN"
+            port     = Read-Host "Depot Port (Default 443)"
+            depot_user = Read-Host "Depot Username"
+            depot_pass = Read-Host "Depot Password"
+        }
+    } else {
+        $Depot = [PSCustomObject]@{ isOfflineDepot = $false }
+    }
+
+    Write-Host "`nSelect Target Bundle Version:" -ForegroundColor Yellow
+    Write-Host "1. 9.0.0"
+    Write-Host "2. 9.0.1"
+    Write-Host "3. 9.0.2"
+    $vChoice = Read-Host "Select (1/2/3)"
+    $ver = switch ($vChoice) { "1" {"9.0.0"} "2" {"9.0.1"} "3" {"9.0.2"} default {"9.0.1"} }
+    $BundleCfg = [PSCustomObject]@{ target_version = $ver }
 }
+
+# Convert password for OvfTool
+$TargetPass = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto([System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($TargetPassIn))
 
 # --- [3] Phase 1: OVA Deployment ---
 Write-Host "`n>>> PHASE 1: Deploying OVA..." -ForegroundColor Cyan
@@ -100,9 +134,13 @@ $OvfArgs = @(
 if ($LASTEXITCODE -ne 0) { Write-Host "[ERROR] Deployment failed." -ForegroundColor Red; exit }
 
 # --- [4] Phase 2: Wait for API Readiness ---
+Write-Host "`n>>> PHASE 2: Initializing VCF services..." -ForegroundColor Cyan
+Write-Host "Sleeping for 3 mins. Waiting for services to initialize." -ForegroundColor Yellow
+Start-Sleep -Seconds 10
+
 $IP = $Props.vami_ip0_SDDC_Manager
 $Authenticated = $false
-Write-Host "`n>>> PHASE 2: Waiting for VCF services at $IP..." -ForegroundColor Cyan
+Write-Host "Beginning authentication attempts at $IP..." -ForegroundColor Cyan
 
 while (-not $Authenticated) {
     $Token = Get-SddcAuthToken -Fqdn $IP -User "admin@local" -Pass $Props.LOCAL_USER_PASSWORD
@@ -115,10 +153,10 @@ while (-not $Authenticated) {
 }
 
 # --- [5] Phase 3: Configure Offline Depot ---
-Write-Host "`n>>> PHASE 3: Configuring Offline Depot Settings..." -ForegroundColor Cyan
+Write-Host "`n>>> PHASE 3: Configuring Depot Settings..." -ForegroundColor Cyan
 $DepotBody = @{
     offlineAccount = @{ username = $Depot.depot_user; password = $Depot.depot_pass }
-    depotConfiguration = @{ isOfflineDepot = $true; hostname = $Depot.hostname; port = $Depot.port }
+    depotConfiguration = @{ isOfflineDepot = $Depot.isOfflineDepot; hostname = $Depot.hostname; port = $Depot.port }
 } | ConvertTo-Json
 
 $Headers = @{ 
@@ -134,12 +172,16 @@ try {
     Write-Host "[ERROR] Depot config failed." -ForegroundColor Red; exit
 }
 
+# --- NEW INITIALIZATION DELAY AFTER DEPOT CONFIG ---
+Write-Host "Sleeping for 3 mins. Initializing binary database, please wait..." -ForegroundColor Yellow
+Start-Sleep -Seconds 180
+
 # --- [6] Phase 4: Bundle Polling ---
 $BundlesFound = $false
 $BundlesUrl = "https://$IP/v1/bundles"
 $OutputFileName = "vcf-bundles-output.json"
 $ConfigVersion = $BundleCfg.target_version
-$VersionPrefix = $ConfigVersion.Substring(0, 5) # Matches "9.0.1"
+$VersionPrefix = $ConfigVersion.Substring(0, 5) 
 
 Write-Host "`n>>> PHASE 4: Polling for Bundles (Prefix: $VersionPrefix)..." -ForegroundColor Cyan
 while (-not $BundlesFound) {
@@ -157,10 +199,9 @@ while (-not $BundlesFound) {
     }
 }
 
-# --- [7] Phase 5: Trigger Bundle Downloads (FIXED LOGIC) ---
-Write-Host "`n>>> PHASE 5: Triggering Downloads (Matching Prefix + INSTALL Type)..." -ForegroundColor Cyan
+# --- [7] Phase 5: Trigger Bundle Downloads ---
+Write-Host "`n>>> PHASE 5: Triggering Downloads (PATCH Method)..." -ForegroundColor Cyan
 
-# Logic: Filter for INSTALL bundles and group by type+version to remove invalid metadata duplicates
 $BundlesToDownload = $Response.elements | Where-Object {
     $_.version -like "$VersionPrefix*" -and ($_.components | Where-Object { $_.imageType -eq "INSTALL" })
 } | Group-Object { $_.components[0].type + $_.version } | ForEach-Object { $_.Group[0] }
@@ -176,8 +217,6 @@ else {
         Write-Host "Triggering: $CompName [$($Bundle.version)]..." -NoNewline
         
         $DownloadUrl = "https://$IP/v1/bundles/$($Bundle.id)"
-        
-        # FIXED BODY: Using bundleDownloadSpec as required by VCF 9
         $DownloadBody = @{
             bundleDownloadSpec = @{
                 downloadNow = $true
