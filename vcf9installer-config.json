@@ -1,5 +1,7 @@
 {
     "Infrastructure": {
+        "TargetHost": "sfo01-m01-r01-esx16.sfo.rainpole.io",
+        "TargetUser": "root",
         "VmName": "vcf9-sddc-manager",
         "Datastore": "Datastor1",
         "Network": "VM Network",
@@ -27,6 +29,6 @@
         "depot_pass": "VMware1!"
     },
     "BundleSettings": {
-        "target_version": "9.0.1.0"
+        "target_version": "9.0.0.0"
     }
 }
