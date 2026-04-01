@@ -62,8 +62,8 @@ foreach ($h in $config.Inventory.Hosts) {
     $vds | Add-VDSwitchPhysicalNetworkAdapter -VMHostPhysicalNic $physicalNic -VMHostVirtualNic $virtualNic -VirtualNicPortgroup (Get-VDPortgroup -VDSwitch $vds -Name $config.Networking.Management.Name) -Confirm:$false | Out-Null
         
     # Provision vMotion & vSAN VMKernels
-    New-VMHostNetworkAdapter -VMHost $VMhost -Portgroup $config.Networking.vMotion.Name -VirtualSwitch $vds -IP $h.VmotionIP -SubnetMask $config.Networking.vMotion.Netmask -vMotionEnabled $true -Confirm:$false | Out-Null
-    New-VMHostNetworkAdapter -VMHost $VMhost -Portgroup $config.Networking.vSAN.Name -VirtualSwitch $vds -IP $h.VsanIP -SubnetMask $config.Networking.vSAN.Netmask -VsanTrafficEnabled $true -Confirm:$false | Out-Null
+    New-VMHostNetworkAdapter -VMHost $VMhost -Portgroup $config.Networking.vMotion.Name -VirtualSwitch $vds -IP $h.VmotionIP -SubnetMask Mtu 1500$config.Networking.vMotion.Netmask -vMotionEnabled $true -Confirm:$false | Out-Null
+    New-VMHostNetworkAdapter -VMHost $VMhost -Portgroup $config.Networking.vSAN.Name -VirtualSwitch $vds -IP $h.VsanIP -SubnetMask $config.Networking.vSAN.Netmask -Mtu 8900 -VsanTrafficEnabled $true -Confirm:$false | Out-Null
 }
 
 # --- STEP 4: MOVE HOSTS TO CLUSTER, MAINTENANCE MODE, & RECLAIM VMNIC0 ---
