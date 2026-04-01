@@ -1,0 +1,44 @@
+{
+    "vCenterSettings": {
+        "FQDN": "sfo-m01-vc01.sfo.rainpole.io",
+        "User": "administrator@vsphere.local"
+    },
+    "HostSettings": {
+        "User": "root",
+        "Password": "VMw@re1!"
+    },
+    "Inventory": {
+        "DatacenterName": "sfo-m01-dc01",
+        "ClusterName": "sfo-m01-cl02",
+        "VsanDatastoreName": "vsanDatastore",
+        "Hosts": [
+           
+            { "FQDN": "sfo01-m01-r01-esx10.sfo.rainpole.io", "VmotionIP": "10.11.12.111", "VsanIP": "10.11.13.111" },
+            { "FQDN": "sfo01-m01-r01-esx11.sfo.rainpole.io", "VmotionIP": "10.11.12.112", "VsanIP": "10.11.13.112" },
+            { "FQDN": "sfo01-m01-r01-esx12.sfo.rainpole.io", "VmotionIP": "10.11.12.112", "VsanIP": "10.11.13.113" }
+        ]
+    },
+    "Networking": {
+        "VdsName": "sfo-m01-cl02-vds02",
+        "MTU":"8900",
+        "Uplinks": ["vmnic0", "vmnic1"],
+        "Management": { 
+            "Name": "sfo-m01-cl02-vds01-pg-esx-ngmt", 
+            "Vlan": 1111, 
+            "Netmask": "255.255.255.0", 
+            "Gateway": "10.10.11.1" 
+        },
+        "vMotion": { 
+            "Name": "sfo-m01-cl02-vds01-pg-vmotion", 
+            "Vlan": 1112, 
+            "Netmask": "255.255.255.0", 
+            "Gateway": "10.11.12.1" 
+        },
+        "vSAN": { 
+            "Name": "sfo-m01-cl02-vds01-pg-vsan", 
+            "Vlan": 1113, 
+            "Netmask": "255.255.255.0", 
+            "Gateway": "10.11.13.1" 
+        }
+    }
+}
