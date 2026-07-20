@@ -1,3 +1,10 @@
+#-----------Script Functionality-------------------
+# The script Provides options to provide Network inputs manually for different Netowrks if a new Fleet is being built. 
+# If additional workloads are being used, the script has the option to use Network Pools from SDDC to test the vMotion and VSAN Networks.
+# The Network Information for TEP should be provided manually in both the cases.
+# The script also gives an option to ping the vMotion and VSAN gateways. 
+#---------------------------------------------------------
+
 #-----------Network Validation Report (Master Optimized)-------------------
 # 1. Sets vSwitch0 MTU to 9000 (if not already set).
 # 2. Adds vmnic1 to vSwitch0 and tests Mgmt redundancy.
