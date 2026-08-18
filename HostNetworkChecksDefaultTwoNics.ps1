@@ -1,5 +1,5 @@
 #-----------Script Functionality-------------------
-# The script assumes there are only two Physical NICS on teh host and by default the NICS are vmnic0 and vmnic1.
+# The script assumes there are only two Physical NICS on the host and by default the NICS are vmnic0 and vmnic1.
 # The script Provides options to provide Network inputs manually for different Netowrks if a new Fleet is being built.
 # The script also prompts if it is a VSAN storage or not. If answer is n, it skips the vSAN checks.
 # If additional workloads are being used, the script has the option to use Network Pools from SDDC to test the vMotion and VSAN Networks.
