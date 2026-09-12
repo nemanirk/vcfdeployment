@@ -1,7 +1,9 @@
 # ==============================================================================
 # SCRIPT: VCSA ESA Bootstrap Deployment Only (vSphere 9.0)
+# Description: Automated unattended deployment of vCenter Server Appliance (VCSA) 
+#              onto a greenfield ESXi target while bootstrapping a single-node 
+#              vSAN Express Storage Architecture (ESA) datastore.
 # ==============================================================================
-
 # --- [ 1. CONFIGURATION VARIABLES ] ---
 
 $IsoPath          = "F:\downloads\VMware-VCSA-all-9.0.2.0100.25629525.iso" 
