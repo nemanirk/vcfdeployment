@@ -1,8 +1,33 @@
 # ==============================================================================
+# VMware Cloud Foundation (VCF) - Host Spec Generator & Commissioner
 # VMware Cloud Foundation - Host Spec Generator
 # Native PowerShell Thumbprint Retrieval & SDDC Validation (No OpenSSL/PuTTY required)
 # ==============================================================================
-
+#
+# OVERVIEW OF EXECUTION FLOW:
+#
+#   1. Input Collection: Prompts for global credentials, Network Pool name, 
+#      domain, storage type (vSAN, NFS, VMFS, etc.), and host list/naming pattern.
+#
+#   2. Host Specification Building: Constructs host objects (FQDN, Storage Type, 
+#      Network Pool Name, Username, Password).
+#
+#   3. Native SSL Fingerprint Retrieval: Connects over Port 443 via .NET SslStream 
+#      to extract each host's SSL SHA-256 certificate thumbprint (No OpenSSL required).
+#
+#   4. Network Pool ID Mapping: (Optional) Connects to SDDC Manager API to auto-fetch
+#      the UUID for the specified Network Pool name.
+#
+#   5. JSON Spec Export: Generates and exports a standard VCF commissioning 
+#      JSON payload (`hostCommission_TIMESTAMP.json`).
+#
+#   6. Automated SDDC Manager Validation & Commissioning:
+#      - Submits JSON payload to `/v1/hosts/validations` API.
+#      - Polls validation status until finished.
+#      - Displays detailed results and (if passed) offers to trigger automatic 
+#        host commissioning via `/v1/hosts`.
+#
+# ==============================================================================
 # 1. Collect shared values
 $username        = "root"
 $password        = Read-Host "Enter password for ESXi root"
