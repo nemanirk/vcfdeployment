@@ -1,21 +1,7 @@
-# ==========================================
+# ==============================================================================
 # VMware Cloud Foundation - Host Spec Generator
-# with AUTOMATED Thumbprint Retrieval and SDDC Validation
-# ==========================================
-
-# ... [Previous logic for collecting values and generating $hosts array remains unchanged] ...
-
-# ==========================================
-# VMware Cloud Foundation - Host Spec Generator
-# with AUTOMATED Thumbprint Retrieval (requires plink.exe)
-# ==========================================
-
-# ==========================================
-# This is an update version of the Host comission Script. This script connects to each host and retrieves the SSL fingerprint and SSH thumbprint.
-# The SSH service must be running on the hosts for the sript to connect and succesfully retrieve the ssh thumbprint.
-# with AUTOMATED Thumbprint Retrieval (requires plink.exe)
-# ==========================================
-
+# Native PowerShell Thumbprint Retrieval & SDDC Validation (No OpenSSL/PuTTY required)
+# ==============================================================================
 
 # 1. Collect shared values
 $username        = "root"
@@ -23,13 +9,53 @@ $password        = Read-Host "Enter password for ESXi root"
 $networkPoolName = Read-Host "Enter network pool name"
 $domainName      = Read-Host "Enter domain name (e.g. lab.local)"
 
+function Get-SddcAuthToken {
+    param ($Fqdn, $User, $Pass)
+    $TokenUrl = "https://$Fqdn/v1/tokens"
+    $Body = @{ username = $User; password = $Pass } | ConvertTo-Json
+    try {
+        $Resp = Invoke-RestMethod -Uri $TokenUrl -Method Post -Body $Body -ContentType "application/json" -SkipCertificateCheck
+        return $Resp.accessToken
+    } catch { throw $_ }
+}
+
+# Native .NET Function to retrieve SSL SHA-256 Thumbprint without OpenSSL
+function Get-ESXiSslThumbprint {
+    param ([string]$Hostname, [int]$Port = 443)
+    try {
+        $tcpClient = New-Object System.Net.Sockets.TcpClient
+        $tcpClient.Connect($Hostname, $Port)
+        $sslStream = New-Object System.Net.Security.SslStream(
+            $tcpClient.GetStream(),
+            $false,
+            ({ $true }), # Bypass SSL cert validation check
+            $null
+        )
+        $sslStream.AuthenticateAsClient($Hostname)
+        $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($sslStream.RemoteCertificate)
+        
+        # Calculate SHA256 Fingerprint
+        $sha256 = [System.Security.Cryptography.SHA256]::Create()
+        $hashBytes = $sha256.ComputeHash($cert.RawData)
+        $thumbprintHex = ($hashBytes | ForEach-Object { $_.ToString("X2") }) -join ":"
+        
+        $sslStream.Close()
+        $tcpClient.Close()
+        return $thumbprintHex
+    }
+    catch {
+        Write-Warning "Could not retrieve SSL Thumbprint for ${Hostname}: $_"
+        return ""
+    }
+}
+
 # 2. Ask if host names are sequential
 do {
     $isSequential = Read-Host "Are the host names sequential with numeric suffix? (yes/no)"
     $isSequential = $isSequential.Trim().ToLower()
 } while ($isSequential -ne "yes" -and $isSequential -ne "no")
 
-# 3. Prompt for storage type choice (shared)
+# 3. Prompt for storage type choice
 $storageOptions = @("VSAN", "VSAN_ESA", "VSAN_REMOTE", "VSAN_MAX", "NFS", "VMFS_FC", "VVOL", "VMFS")
 
 Write-Host "`nSelect Storage Type:"
@@ -47,7 +73,6 @@ $hosts = @()
 
 # 4. Host List Generation Logic
 if ($isSequential -eq "yes") {
-    # Validate suffix base is numeric string and prompt until valid
     do {
         $suffixBase = Read-Host "Enter host suffix base (numeric, e.g. 01)"
         $canConvert = [int]::TryParse($suffixBase, [ref]$null)
@@ -56,7 +81,6 @@ if ($isSequential -eq "yes") {
         }
     } while (-not $canConvert)
 
-    # Validate number of hosts input between 1 and 50
     function Get-NumberOfHosts {
         [CmdletBinding()]
         Param()
@@ -64,8 +88,8 @@ if ($isSequential -eq "yes") {
         $numberOfHosts = 0
         do {
             try {
-                $input = Read-Host -Prompt "Enter the number of hosts (1-50)"
-                $numberOfHosts = [int]$input
+                $inputVal = Read-Host -Prompt "Enter the number of hosts (1-50)"
+                $numberOfHosts = [int]$inputVal
                 if ($numberOfHosts -ge 1 -and $numberOfHosts -le 50) {
                     $isValid = $true
                 } else {
@@ -95,7 +119,6 @@ if ($isSequential -eq "yes") {
             storageType     = $storageType
             networkPoolName = $networkPoolName
             sslThumbprint   = ""
-            sshThumbprint   = ""
         }
     }
 } else {
@@ -123,258 +146,157 @@ if ($isSequential -eq "yes") {
             storageType     = $storageType
             networkPoolName = $networkPoolName
             sslThumbprint   = ""
-            sshThumbprint   = ""
         }
     }
 }
 
 # ==========================================
-# 5. Automated Thumbprint Retrieval
+# 5. Automated Native SSL Thumbprint Retrieval
 # ==========================================
 Write-Host "`n----------------------------------------"
-$retrieveThumbprints = Read-Host "Do you want to automatically retrieve SSL/SSH thumbprints? (yes/no)"
+$retrieveThumbprints = Read-Host "Do you want to automatically retrieve SSL thumbprints? (yes/no)"
 
 if ($retrieveThumbprints.ToLower().Trim() -eq "yes") {
-    
-    # Check dependencies
-    $hasOpenSSL = (Get-Command openssl.exe -ErrorAction SilentlyContinue)
-    
-    # CHECK FOR PLINK (Required for password automation)
-    $hasPlink = (Get-Command plink.exe -ErrorAction SilentlyContinue)
-
-    if (-not $hasOpenSSL -or -not $hasPlink) {
-        Write-Warning "Missing Dependencies:"
-        if (-not $hasOpenSSL) { Write-Warning " - OpenSSL.exe not found." }
-        if (-not $hasPlink)   { Write-Warning " - plink.exe (PuTTY Link) not found. Required for password automation." }
-        Write-Error "Cannot proceed. Please install OpenSSL and PuTTY (plink.exe) and add to PATH."
-        # Don't exit script, just skip retrieval so user gets partial JSON
-    } 
-    else {
-        Write-Host "`nStarting Automated Retrieval..." -ForegroundColor Cyan
-
-        foreach ($hostObj in $hosts) {
-            $targetHost = $hostObj.fqdn
-            Write-Host "`nProcessing: $targetHost" -ForegroundColor Cyan
-
-            # --- A. Get SSL Thumbprint ---
-            try {
-                $OpenSslCmd = "echo Q | openssl s_client -connect ${targetHost}:443 2>NUL | openssl x509 -noout -fingerprint -sha256"
-                $Output = cmd /c $OpenSslCmd
-                
-                if ($Output -match "Fingerprint=(.+)") {
-                    $hostObj.sslThumbprint = $matches[1]
-                    Write-Host " [SSL] Retrieved: $($hostObj.sslThumbprint)" -ForegroundColor Green
-                } else {
-                    Write-Warning " [SSL] Failed to retrieve or parse output."
-                }
-            } catch {
-                Write-Warning " [SSL] Error: $_"
-            }
-
-            # --- B. Get SSH Thumbprint (using PLINK for auth) ---
-            try {
-                # Plink arguments:
-                # -batch : Disable interactive prompts
-                # -ssh   : Use SSH protocol
-                # -pw    : Pass the password variable
-                # -o StrictHostKeyChecking=no : Auto-accept host keys (Command syntax differs slightly for Plink vs SSH)
-                
-                # Note: Plink handles "StrictHostKeyChecking" by answering 'y' to prompts if piped "echo y", 
-                # but modern plink has -batch which aborts on prompts.
-                # To bypass host key prompt in Plink effectively without manual intervention:
-                $PlinkCmd = "echo y | plink -ssh -l root -pw $password $targetHost ""cat /etc/ssh/ssh_host_rsa_key.pub"""
-                
-                # Invoke via cmd /c to handle the pipe "echo y | plink"
-                $PublicKeyString = cmd /c $PlinkCmd
-
-                # Parse output (Plink might output the key along with "Access granted" or banner info)
-                # We specifically look for the "ssh-rsa ..." line
-                if ($PublicKeyString -match "(ssh-rsa\s+[A-Za-z0-9+/]+={0,2})") {
-                    $CleanKey = $matches[1]
-                    
-                    # Calculate SHA256 locally
-                    $Parts = $CleanKey.Trim() -split " "
-                    if ($Parts.Count -ge 2) {
-                        $Base64Key = $Parts[1]
-                        $KeyBytes = [System.Convert]::FromBase64String($Base64Key)
-                        $Sha256 = [System.Security.Cryptography.SHA256]::Create()
-                        $HashBytes = $Sha256.ComputeHash($KeyBytes)
-                        $ThumbRaw = [System.Convert]::ToBase64String($HashBytes).TrimEnd('=')
-                        
-                        $hostObj.sshThumbprint = "SHA256:$ThumbRaw"
-                        Write-Host " [SSH] Retrieved: $($hostObj.sshThumbprint)" -ForegroundColor Green
-                    }
-                } else {
-                    Write-Warning " [SSH] Failed. Output did not contain a valid public key."
-                    # Debug output if needed: Write-Host $PublicKeyString
-                }
-            } catch {
-                Write-Warning " [SSH] Error: $_"
-            }
+    Write-Host "`nStarting Native Automated SSL Retrieval..." -ForegroundColor Cyan
+    foreach ($hostObj in $hosts) {
+        $targetHost = $hostObj.fqdn
+        Write-Host "Processing: $targetHost" -ForegroundColor Cyan
+        $thumbprint = Get-ESXiSslThumbprint -Hostname $targetHost
+        if ($thumbprint) {
+            $hostObj.sslThumbprint = $thumbprint
+            Write-Host " [SSL SHA-256] Retrieved: $($hostObj.sslThumbprint)" -ForegroundColor Green
         }
     }
-} else {
-    Write-Host "Skipping interactive thumbprint retrieval." -ForegroundColor Gray
 }
 
-# # ==========================================
-# VMware Cloud Foundation - Host Spec Generator
-# Single-Auth for Pool Lookup & Validation
 # ==========================================
-
-# ... [Previous logic for collecting $username, $password, $hosts array remains unchanged] ...
-
-# # ==========================================
-# 5.5. SDDC Manager Integration (Pool Lookup & Auth)
+# 5.5. Network Pool ID Selection
 # ==========================================
 Write-Host "`n----------------------------------------"
-$connectSddc = Read-Host "Connect to SDDC Manager for Network Pool IDs and Validation? (y/n)"
+Write-Host "Network Pool ID Selection:"
+Write-Host "[1] Retrieve from SDDC Manager automatically"
+Write-Host "[2] Manually enter Network Pool ID"
+Write-Host "[3] Will edit JSON manually"
+
+do {
+    $poolOption = Read-Host "Select an option (1, 2, or 3)"
+} while ($poolOption -notmatch "^[123]$")
+
 $globalToken = $null
 $sddcFqdn = ""
 
-if ($connectSddc.ToLower().Trim() -eq "y") {
+if ($poolOption -eq "1") {
     $sddcFqdn = Read-Host "Enter SDDC Manager FQDN"
     $sddcUser = "administrator@vsphere.local"
     $sddcPass = Read-Host "Enter password for $sddcUser" -AsSecureString
-    
-    # Secure string handling
     $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($sddcPass)
     $plainPass = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
 
     try {
         Write-Host "Authenticating with SDDC Manager..." -ForegroundColor Cyan
         $globalToken = Get-SddcAuthToken -Fqdn $sddcFqdn -User $sddcUser -Pass $plainPass
-        $headers = @{
-            "Authorization" = "Bearer $globalToken"
-            "Content-Type"  = "application/json"
-        }
-
-        # Fetch Network Pools
-        Write-Host "Retrieving Network Pools..." -ForegroundColor Gray
-        $poolUrl = "https://$sddcFqdn/v1/network-pools"
-        $poolsResponse = Invoke-RestMethod -Method Get -Uri $poolUrl -Headers $headers -SkipCertificateCheck
-
-        # FIX: The API returns pools inside an 'elements' array
+        $headers = @{ "Authorization" = "Bearer $globalToken"; "Content-Type"   = "application/json" }
+        $poolsResponse = Invoke-RestMethod -Method Get -Uri "https://$sddcFqdn/v1/network-pools" -Headers $headers -SkipCertificateCheck
         $poolList = $poolsResponse.elements
 
-        # Perform Lookup
         foreach ($hostObj in $hosts) {
-            # Search inside the 'elements' array for a matching name
             $matchedPool = $poolList | Where-Object { $_.name -eq $hostObj.networkPoolName }
-            
             if ($null -ne $matchedPool) {
-                # Add the ID to the host object
                 $hostObj | Add-Member -MemberType NoteProperty -Name "networkPoolId" -Value $matchedPool.id -Force
                 Write-Host "SUCCESS: Mapped '$($hostObj.networkPoolName)' to ID: $($matchedPool.id) for $($hostObj.fqdn)" -ForegroundColor Green
             } else {
-                Write-Warning "FAILED: Network Pool '$($hostObj.networkPoolName)' not found in SDDC Manager."
+                Write-Warning "FAILED: Network Pool '$($hostObj.networkPoolName)' not found."
                 $hostObj | Add-Member -MemberType NoteProperty -Name "networkPoolId" -Value "NOT_FOUND" -Force
             }
         }
+    } catch { Write-Error "Failed to integrate with SDDC Manager: $($_.Exception.Message)" }
+    finally { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
+} 
+elseif ($poolOption -eq "2") {
+    $manualPoolId = Read-Host "Enter Network Pool ID (UUID)"
+    foreach ($hostObj in $hosts) {
+        $hostObj | Add-Member -MemberType NoteProperty -Name "networkPoolId" -Value $manualPoolId -Force
     }
-    catch {
-        Write-Error "Failed to integrate with SDDC Manager: $($_.Exception.Message)"
-    }
-    finally {
-        [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+} 
+else {
+    foreach ($hostObj in $hosts) {
+        $hostObj | Add-Member -MemberType NoteProperty -Name "networkPoolId" -Value "EDIT_MANUALLY" -Force
     }
 }
 
 # ==========================================
-# 6. JSON Export (Removed hostSpecs Wrapper)
+# 6. JSON Export
 # ==========================================
-
-# Determine output filename
 $directory = Get-Location
 $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $path      = Join-Path -Path $directory -ChildPath "hostCommission_$timestamp.json"
-
-# Export the raw array directly
 $jsonContent = $hosts | ConvertTo-Json -Depth 5
 $jsonContent | Set-Content -Path $path -Encoding UTF8
 
 Write-Host "`n----------------------------------------"
-Write-Host "JSON saved (Raw Array) to: $path" -ForegroundColor Green
+Write-Host "JSON saved to: $path" -ForegroundColor Green
 
-# # ==========================================
+if ($poolOption -eq "3") {
+    Write-Host "Option 3 selected. Ending script." -ForegroundColor Cyan
+    exit
+}
+
+# ==========================================
 # 7. SDDC Manager Validation & Commissioning
 # ==========================================
-if ($null -ne $globalToken) {
-    $doValidate = Read-Host "`nWould you like to validate this spec against SDDC Manager now? (y/n)"
-    
-    if ($doValidate.ToLower().Trim() -eq "y") {
-        try {
-            $valHeaders = @{
-                "Authorization" = "Bearer $globalToken"
-                "Content-Type"  = "application/json"
-            }
+$shouldValidate = $false
 
-            Write-Host "Submitting Host Commission Validation..." -ForegroundColor Yellow
-            $valUrl = "https://$sddcFqdn/v1/hosts/validations"
-            $valResponse = Invoke-RestMethod -Method Post -Uri $valUrl -Body $jsonContent -Headers $valHeaders -SkipCertificateCheck
-            
-            $valId = $valResponse.id
-            Write-Host "Validation Task Submitted. ID: $valId" -ForegroundColor Green
-
-            # --- Polling Logic ---
-            $statusUrl = "https://$sddcFqdn/v1/hosts/validations/$valId"
-            $isFinished = $false
-            
-            while (-not $isFinished) {
-                $statusResp = Invoke-RestMethod -Method Get -Uri $statusUrl -Headers $valHeaders -SkipCertificateCheck
-                
-                # Retrieve executionStatus (IN_PROGRESS, COMPLETED, FAILED)
-                $execStatus = $statusResp.executionStatus
-                # Retrieve resultStatus (SUCCEEDED, FAILED) - may be null until COMPLETED
-                $resStatus  = if ($statusResp.PSObject.Properties['resultStatus']) { $statusResp.resultStatus } else { "PENDING" }
-
-                $time = Get-Date -Format "HH:mm:ss"
-                Write-Host "[$time] Execution: $execStatus | Result: $resStatus" -ForegroundColor Cyan
-
-                if ($execStatus -eq "COMPLETED" -or $execStatus -eq "FAILED") {
-                    $isFinished = $true
-                    Write-Host "`nValidation Process Finished." -ForegroundColor Gray
-                    
-                    if ($resStatus -eq "SUCCEEDED") {
-                        Write-Host "SUCCESS: Host specification is valid for commissioning!" -ForegroundColor Green
-                        
-                        # --- COMMISSION TRIGGER ---
-                        do {
-                            $commChoice = Read-Host "`nDo you want to commission these hosts now? (y/n)"
-                        } while ($commChoice -notmatch "^[yn]$")
-
-                        if ($commChoice -eq 'y') {
-                            Write-Host "Submitting Host Commissioning Request..." -ForegroundColor Yellow
-                            $commUrl = "https://$sddcFqdn/v1/hosts"
-                            $commResp = Invoke-RestMethod -Method Post -Uri $commUrl -Body $jsonContent -Headers $valHeaders -SkipCertificateCheck
-                            
-                            Write-Host "`n===========================================================" -ForegroundColor Green
-                            Write-Host "COMMISSION TASK SUBMITTED SUCCESSFULLY"
-                            Write-Host "Task ID: $($commResp.id)" -ForegroundColor White
-                            Write-Host "Please monitor progress in the SDDC Manager UI under 'Tasks'."
-                            Write-Host "===========================================================" -ForegroundColor Green
-                        } else {
-                            Write-Host "Commissioning skipped by user." -ForegroundColor Gray
-                        }
-                    } 
-                    else {
-                        Write-Host "FAILED: Validation encountered errors." -ForegroundColor Red
-                        # Print errors if available
-                        if ($statusResp.PSObject.Properties['validationResults']) {
-                            $statusResp.validationResults | Where-Object { $_.status -eq "FAILED" } | ForEach-Object {
-                                Write-Host " - [$($_.name)]: $($_.errorMessages)" -ForegroundColor Red
-                            }
-                        }
-                    }
-                } 
-                else {
-                    # Status is likely IN_PROGRESS, wait 60 seconds
-                    Start-Sleep -Seconds 60
-                }
-            }
-        }
-        catch {
-            Write-Error "API Workflow Error: $($_.Exception.Message)"
-        }
+if ($poolOption -eq "1" -and $null -ne $globalToken) {
+    if ((Read-Host "`nWould you like to validate this spec against SDDC Manager now? (y/n)") -eq "y") {
+        $shouldValidate = $true
     }
+}
+elseif ($poolOption -eq "2") {
+    if ((Read-Host "`nWould you like to validate this spec against SDDC Manager now? (y/n)") -eq "y") {
+        $sddcFqdn = Read-Host "Enter SDDC Manager FQDN"
+        $sddcUser = "administrator@vsphere.local"
+        $sddcPass = Read-Host "Enter password for $sddcUser" -AsSecureString
+        $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($sddcPass)
+        $plainPass = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
+        try {
+            $globalToken = Get-SddcAuthToken -Fqdn $sddcFqdn -User $sddcUser -Pass $plainPass
+            if ($null -ne $globalToken) { $shouldValidate = $true }
+        } catch { Write-Error "Auth Failed: $($_.Exception.Message)" }
+        finally { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
+    }
+}
+
+if ($shouldValidate -and $null -ne $globalToken) {
+    try {
+        $valHeaders = @{ "Authorization" = "Bearer $globalToken"; "Content-Type" = "application/json" }
+        Write-Host "Submitting Host Commission Validation..." -ForegroundColor Yellow
+        $valResponse = Invoke-RestMethod -Method Post -Uri "https://$sddcFqdn/v1/hosts/validations" -Body $jsonContent -Headers $valHeaders -SkipCertificateCheck
+        $valId = $valResponse.id
+        Write-Host "Validation Task Submitted. ID: $valId" -ForegroundColor Green
+
+        $isFinished = $false
+        while (-not $isFinished) {
+            $statusResp = Invoke-RestMethod -Method Get -Uri "https://$sddcFqdn/v1/hosts/validations/$valId" -Headers $valHeaders -SkipCertificateCheck
+            $execStatus = $statusResp.executionStatus
+            $resStatus  = if ($statusResp.PSObject.Properties['resultStatus']) { $statusResp.resultStatus } else { "PENDING" }
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Execution: $execStatus | Result: $resStatus" -ForegroundColor Cyan
+
+            if ($execStatus -match "COMPLETED|FAILED") {
+                $isFinished = $true
+                $vLogFile = "host-validation-$(Get-Date -Format 'yyyyMMdd_HHmm').json"
+                $statusResp | ConvertTo-Json -Depth 10 | Set-Content -Path $vLogFile
+                Write-Host "`n[+] Validation results saved to: $vLogFile" -ForegroundColor Green
+                
+                if ($resStatus -eq "SUCCEEDED") {
+                    Write-Host "SUCCESS: Validated!" -ForegroundColor Green
+                    if ((Read-Host "`nCommission these hosts now? (y/n)") -eq 'y') {
+                        $commResp = Invoke-RestMethod -Method Post -Uri "https://$sddcFqdn/v1/hosts" -Body $jsonContent -Headers $valHeaders -SkipCertificateCheck
+                        Write-Host "`nCOMMISSION TASK SUBMITTED. ID: $($commResp.id)" -ForegroundColor Green
+                    }
+                } else {
+                    Write-Host "FAILED: Check $vLogFile for errors." -ForegroundColor Red
+                }
+            } else { Start-Sleep -Seconds 30 }
+        }
+    } catch { Write-Error "API Error: $($_.Exception.Message)" }
 }
